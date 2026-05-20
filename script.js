@@ -1,366 +1,117 @@
 /**
- * 早餐點餐工具 - 原生 API 版 (OAuth 2.0)
- * 完全移除 GAS，改用 Google Sheets API v4。
+ * 早餐點餐工具 - GAS API 版 (免登入)
  */
 
-// --- 憑證設定 (由 config.js 提供) ---
-let CLIENT_ID, SPREADSHEET_ID;
-
-try {
-    if (typeof CONFIG === 'undefined') {
-        throw new Error('找不到 CONFIG 設定。請確認 config.js 是否正確載入並上傳至伺服器。');
-    }
-    CLIENT_ID = CONFIG.CLIENT_ID;
-    SPREADSHEET_ID = CONFIG.SPREADSHEET_ID;
-} catch (e) {
-    console.error('Initialization error:', e);
-    // 注意：此時 DOM 可能還沒載入完畢，預留一個標記
-    window.configError = e.message;
-}
-
-const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/userinfo.email';
-const DISCOVERY_DOC = 'https://sheets.googleapis.com/$discovery/rest?version=v4';
-
-// --- 狀態管理 ---
 let state = {
     shops: [],
     menu: [],
     records: [],
-    admins: [], // 新增：管理員清單
-    user: null, // 新增：當前使用者資訊
     currentShop: null,
     order: [],
-    tokenClient: null,
-    gapiInited: false,
-    gisInited: false,
-    currentItemWithOptions: null, // 暫存正在選擇選項的品項
-    sheetIds: {}, // 新增：分頁名稱與 ID 的對照表
-    currentUserRole: null // 新增：當前使用者的身份
+    currentItemWithOptions: null,
+    adminPassword: null,
+    currentUserRole: '一般人員'
 };
-
-// --- 初始化流程 ---
-
-function gapiLoaded() {
-    gapi.load('client', initializeGapiClient);
-}
-
-async function initializeGapiClient() {
-    try {
-        console.log('Initializing GAPI client...');
-        await gapi.client.init({
-            discoveryDocs: [DISCOVERY_DOC],
-        });
-        state.gapiInited = true;
-        console.log('GAPI client inited.');
-        maybeStartApp();
-    } catch (e) {
-        console.error('GAPI init error:', e);
-        const errorDetail = e.details || e.message || (e.result && e.result.error ? e.result.error.message : JSON.stringify(e));
-        showFatalError(`Google API (GAPI) 初始化失敗：${errorDetail}`);
-    }
-}
-
-function gisLoaded() {
-    try {
-        console.log('Initializing GIS client...');
-        if (!google || !google.accounts || !google.accounts.oauth2) {
-            throw new Error('找不到 Google Identity Services 腳本，可能被廣告攔截器阻擋。');
-        }
-        state.tokenClient = google.accounts.oauth2.initTokenClient({
-            client_id: CLIENT_ID,
-            scope: SCOPES,
-            callback: '',
-        });
-        state.gisInited = true;
-        console.log('GIS client inited.');
-        maybeStartApp();
-    } catch (e) {
-        console.error('GIS init error:', e);
-        showFatalError(`Google 登入元件 (GIS) 載入失敗：${e.message}`);
-    }
-}
-
-// 初始化監聽狗：如果 10 秒後還沒完成初始化，給予提示
-setTimeout(() => {
-    if (!state.gapiInited || !state.gisInited) {
-        if (!window.configError) {
-            console.warn('Initialization timeout.');
-            const missing = [];
-            if (!state.gapiInited) missing.push('基礎 API (GAPI)');
-            if (!state.gisInited) missing.push('登入元件 (GIS)');
-            showFatalError(`系統初始化超時，尚未載入：${missing.join('、')}。請檢查網路連接或關閉廣告攔截器 (AdBlock)。`);
-        }
-    }
-}, 10000);
-
-function maybeStartApp() {
-    if (state.gapiInited && state.gisInited) {
-        initApp();
-    }
-}
 
 function initApp() {
     initDateTime();
     initEventListeners();
+    updateRoleUI();
 
-    // 檢查是否有設定檔錯誤
-    if (window.configError) {
-        showFatalError(window.configError);
+    if (typeof CONFIG === 'undefined' || !CONFIG.GAS_URL) {
+        showToast('⚠️ 系統錯誤：找不到 CONFIG 設定或未設定 GAS_URL。');
         return;
     }
 
-    // 更新登入按鈕狀態為可用
-    const loginBtn = document.getElementById('login-btn-lg');
-    if (loginBtn) {
-        loginBtn.disabled = false;
-        loginBtn.innerHTML = '🔐 以 Google 帳號登入';
-    }
+    fetchData();
 
-    // 如果已經有 token，嘗試獲取使用者資訊並進入
-    const savedToken = localStorage.getItem('google_access_token');
-    if (savedToken) {
-        gapi.client.setToken({ access_token: savedToken });
-        fetchUserInfo();
-    } else {
-        showLoginOverlay(true);
-    }
-}
-
-// --- 介面控制 ---
-
-function showLoginOverlay(show) {
-    const overlay = document.getElementById('login-overlay');
-    if (show) {
-        overlay.style.display = 'flex';
-        overlay.style.opacity = '1';
-        
-        // 如果 API 還沒準備好，禁用按鈕並提示
-        const loginBtn = document.getElementById('login-btn-lg');
-        if (loginBtn && (!state.gapiInited || !state.gisInited) && !window.configError) {
-            loginBtn.disabled = true;
-            loginBtn.innerHTML = '⌛ 正在初始化系統...';
+    // 自動喚醒更新時間
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            if (state.order.length === 0) {
+                initDateTime();
+            }
         }
-    } else {
-        overlay.style.opacity = '0';
-        setTimeout(() => overlay.style.display = 'none', 500);
-    }
+    });
 }
 
-function showFatalError(msg) {
-    const errorMsgEl = document.getElementById('auth-error-msg');
-    const loginBtn = document.getElementById('login-btn-lg');
-    
-    if (errorMsgEl) {
-        errorMsgEl.textContent = `⚠️ 系統錯誤：${msg}`;
-        errorMsgEl.classList.remove('hidden');
-    }
-    if (loginBtn) {
-        loginBtn.disabled = true;
-        loginBtn.innerHTML = '❌ 系統無法啟動';
-    }
-}
+// 啟動應用程式
+document.addEventListener('DOMContentLoaded', initApp);
 
-function updateRoleUI(role) {
+function updateRoleUI() {
     const roleBadge = document.getElementById('user-role');
     const adminBtns = document.querySelectorAll('.btn-admin');
+    const authBtn = document.getElementById('auth-btn');
 
-    if (role === '管理員') {
+    if (state.adminPassword) {
         roleBadge.textContent = '👑 管理員';
         roleBadge.className = 'badge admin';
         adminBtns.forEach(b => b.classList.remove('hidden'));
+        authBtn.textContent = '登出管理員';
+        authBtn.onclick = logoutAdmin;
+        state.currentUserRole = '管理員';
     } else {
-        roleBadge.textContent = '👤 人員';
+        roleBadge.textContent = '👤 一般人員';
         roleBadge.className = 'badge';
         adminBtns.forEach(b => b.classList.add('hidden'));
+        authBtn.textContent = '👑 管理員登入';
+        authBtn.onclick = () => document.getElementById('admin-login-modal').classList.remove('hidden');
+        state.currentUserRole = '一般人員';
     }
-}
-
-// --- 授權邏輯 ---
-
-async function fetchUserInfo() {
-    try {
-        const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-            headers: { 'Authorization': `Bearer ${gapi.client.getToken().access_token}` }
-        });
-        state.user = await response.json();
-        updateAuthUI(true);
-        fetchData();
-    } catch (e) {
-        showLoginOverlay(true);
-    }
-}
-
-function getToken(callback) {
-    console.log('getToken called');
-    const loginBtn = document.getElementById('login-btn-lg');
-    const originalText = loginBtn ? loginBtn.innerHTML : '🔐 以 Google 帳號登入';
     
-    if (loginBtn) {
-        loginBtn.disabled = true;
-        loginBtn.innerHTML = '⌛ 正在開啟驗證視窗...';
-    }
-
-    try {
-        if (!state.tokenClient) {
-            throw new Error('Google 登入元件尚未就緒，請稍後再試。');
-        }
-
-        state.tokenClient.callback = async (resp) => {
-            console.log('GIS callback received', resp);
-            if (resp.error !== undefined) {
-                if (loginBtn) {
-                    loginBtn.disabled = false;
-                    loginBtn.innerHTML = originalText;
-                }
-                alert(`登入發生錯誤: ${resp.error}\n${resp.error_description || ''}`);
-                throw (resp);
-            }
-            localStorage.setItem('google_access_token', resp.access_token);
-            localStorage.setItem('google_token_expiry', Date.now() + (resp.expires_in * 1000));
-            fetchUserInfo();
-            if (callback) callback();
-        };
-
-        console.log('Requesting access token...');
-        if (gapi.client.getToken() === null) {
-            state.tokenClient.requestAccessToken({ prompt: 'consent' });
-        } else {
-            state.tokenClient.requestAccessToken({ prompt: '' });
-        }
-
-        // 超時恢復機制：如果 10 秒後沒反應，恢復按鈕（可能彈窗被攔截了）
-        setTimeout(() => {
-            if (loginBtn && loginBtn.disabled && loginBtn.innerHTML.includes('正在開啟')) {
-                loginBtn.disabled = false;
-                loginBtn.innerHTML = originalText;
-                console.warn('Login request timed out. Popup might be blocked.');
-            }
-        }, 10000);
-
-    } catch (err) {
-        console.error('getToken error:', err);
-        alert(`無法啟動 Google 登入: ${err.message}`);
-        if (loginBtn) {
-            loginBtn.disabled = false;
-            loginBtn.innerHTML = originalText;
-        }
+    // 如果有選中店家，重新渲染選單以顯示/隱藏刪除按鈕
+    if (state.currentShop) {
+        renderMenu(state.currentShop);
     }
 }
 
-function revokeToken() {
-    const token = gapi.client.getToken();
-    if (token !== null) {
-        google.accounts.oauth2.revoke(token.access_token);
-        gapi.client.setToken('');
-        localStorage.removeItem('google_access_token');
-        localStorage.removeItem('google_token_expiry');
-        updateAuthUI(false);
-        showLoginOverlay(true);
-        showToast('🔓 已登出 Google 授權');
-    }
+function logoutAdmin() {
+    state.adminPassword = null;
+    updateRoleUI();
+    showToast('已登出管理員');
 }
 
-function updateAuthUI(isLoggedIn) {
-    const authBtn = document.getElementById('auth-btn');
-    const userName = document.getElementById('user-name');
-    if (isLoggedIn) {
-        authBtn.textContent = '🔓 登出';
-        authBtn.onclick = revokeToken;
-        userName.textContent = state.user.email;
-    } else {
-        authBtn.textContent = '🔐 登入';
-        authBtn.onclick = () => getToken();
-        userName.textContent = '未登入';
-    }
-}
+function fetchData() {
+    const callbackName = 'jsonp_callback_' + Math.round(100000 * Math.random());
+    window[callbackName] = function(data) {
+        delete window[callbackName];
+        
+        state.shops = data.shops || [];
+        state.menu = data.menu || [];
+        state.records = data.records || [];
 
-// --- 資料讀取邏輯 ---
-
-async function fetchSpreadsheetMetadata() {
-    try {
-        const response = await gapi.client.sheets.spreadsheets.get({
-            spreadsheetId: SPREADSHEET_ID
+        state.menu.forEach(product => {
+            const isDrink = ["紅茶", "豆漿", "奶茶", "咖啡", "拿鐵"].some(key => product.item.includes(key));
+            product.hasTemp = isDrink;
+            product.hasSugar = isDrink;
         });
-        const sheets = response.result.sheets;
-        state.sheetIds = {};
-        sheets.forEach(s => {
-            state.sheetIds[s.properties.title] = s.properties.sheetId;
-        });
-        console.log('Sheet IDs loaded:', state.sheetIds);
-    } catch (err) {
-        console.error('Error fetching spreadsheet metadata:', err);
-    }
-}
-
-async function fetchData() {
-    try {
-        // 先獲取 metadata (如果還沒有)
-        if (Object.keys(state.sheetIds).length === 0) {
-            await fetchSpreadsheetMetadata();
-        }
-
-        const response = await gapi.client.sheets.spreadsheets.values.batchGet({
-            spreadsheetId: SPREADSHEET_ID,
-            ranges: ['早餐店!A1:A100', '價格!A2:E500', '紀錄!A:D', '管理員!A2:C50'],
-        });
-        const valueRanges = response.result.valueRanges;
-
-        // 1. 處理管理員清單並驗證權限
-        state.admins = (valueRanges[3].values || []).map(row => ({
-            name: row[0],
-            email: row[1],
-            role: row[2]
-        }));
-
-        const currentUser = state.admins.find(a => a.email.toLowerCase() === state.user.email.toLowerCase());
-        if (!currentUser) {
-            document.getElementById('auth-error-msg').classList.remove('hidden');
-            showLoginOverlay(true);
-            return;
-        }
-
-        state.currentUserRole = currentUser.role; // 儲存身份
-        showLoginOverlay(false);
-        updateRoleUI(currentUser.role);
-
-        // 2. 處理其它資料
-        state.shops = (valueRanges[0].values || []).flat().filter(s => s !== "");
-        state.menu = (valueRanges[1].values || []).map((row, index) => {
-            const item = row[1] || "";
-            // 嚴格限制：僅限「紅茶、豆漿、奶茶、咖啡、拿鐵」才開啟選項
-            const isDrink = ["紅茶", "豆漿", "奶茶", "咖啡", "拿鐵"].some(key => item.includes(key));
-            return {
-                shop: row[0],
-                item: item,
-                price: parseInt(row[2]) || 0,
-                hasTemp: isDrink,
-                hasSugar: isDrink,
-                rowIndex: index + 2 // 記錄在試算表中的行數 (A2 開始，所以 index 0 是第 2 行)
-            };
-        });
-        const recordRows = valueRanges[2].values || [];
-        state.records = recordRows.slice(1).reverse().slice(0, 5).map(row => ({
-            pickupDate: row[0],
-            pickupTime: row[1],
-            items: row[2],
-            total: row[3]
-        }));
 
         renderShops();
         renderRecords();
-    } catch (err) {
-        console.error('Fetch error:', err);
-        showToast('❌ 讀取失敗，請確認授權權限');
-    }
+    };
+
+    const script = document.createElement('script');
+    script.src = CONFIG.GAS_URL + (CONFIG.GAS_URL.includes('?') ? '&' : '?') + 'callback=' + callbackName;
+    script.onerror = function() {
+        console.error('Fetch error via JSONP');
+        showToast('❌ 讀取資料失敗，請確認 GAS_URL 或網路');
+    };
+    document.body.appendChild(script);
 }
 
-// --- 渲染與點餐邏輯 ---
+async function sendPostRequest(params) {
+    const response = await fetch(CONFIG.GAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(params)
+    });
+    return await response.json();
+}
 
 function initDateTime() {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // 使用在地時間格式避免 UTC 時差造成日期偏移
     const y = tomorrow.getFullYear();
     const m = String(tomorrow.getMonth() + 1).padStart(2, '0');
     const d = String(tomorrow.getDate()).padStart(2, '0');
@@ -379,12 +130,27 @@ function initDateTime() {
 }
 
 function initEventListeners() {
-    document.getElementById('login-btn-lg').addEventListener('click', () => getToken());
-    document.getElementById('auth-btn').addEventListener('click', revokeToken);
     document.getElementById('submit-order').addEventListener('click', submitOrder);
     document.getElementById('clear-order').addEventListener('click', clearOrder);
     document.getElementById('cancel-options').addEventListener('click', closeOptionsModal);
     document.getElementById('confirm-options').addEventListener('click', confirmOptions);
+
+    // 管理員登入彈窗
+    document.getElementById('cancel-admin-login').onclick = () => {
+        document.getElementById('admin-login-modal').classList.add('hidden');
+    };
+    document.getElementById('confirm-admin-login').onclick = () => {
+        const pwd = document.getElementById('admin-password-input').value;
+        if (pwd === '496527') {
+            state.adminPassword = pwd;
+            document.getElementById('admin-login-modal').classList.add('hidden');
+            document.getElementById('admin-password-input').value = '';
+            updateRoleUI();
+            showToast('✅ 管理員登入成功');
+        } else {
+            showToast('❌ 密碼錯誤');
+        }
+    };
 
     // 管理員按鈕
     document.getElementById('admin-add-shop').addEventListener('click', openAddShopModal);
@@ -476,38 +242,26 @@ async function deleteMeal(product) {
         return;
     }
 
-    const sheetId = state.sheetIds['價格'];
-    if (sheetId === undefined) {
-        showToast('❌ 找不到「價格」分頁 ID，請重新整理頁面');
-        return;
-    }
-
     try {
         showToast('⏳ 正在刪除...');
-        await gapi.client.sheets.spreadsheets.batchUpdate({
-            spreadsheetId: SPREADSHEET_ID,
-            resource: {
-                requests: [{
-                    deleteDimension: {
-                        range: {
-                            sheetId: sheetId,
-                            dimension: 'ROWS',
-                            startIndex: product.rowIndex - 1, // 0-indexed
-                            endIndex: product.rowIndex
-                        }
-                    }
-                }]
-            }
+        const res = await sendPostRequest({
+            action: 'deleteMeal',
+            password: state.adminPassword,
+            rowIndex: product.rowIndex,
+            item: product.item
         });
-        showToast(`✅ 已刪除：${product.item}`);
-        fetchData(); // 重新整理資料
+        if (res.status === 'success') {
+            showToast(`✅ 已刪除：${product.item}`);
+            fetchData();
+        } else {
+            showToast(`❌ 刪除失敗：${res.message}`);
+        }
     } catch (err) {
         console.error('Delete error:', err);
-        showToast('❌ 刪除失敗，請確認權限或網路');
+        showToast('❌ 刪除失敗，請確認網路');
     }
 }
 
-// 點擊加入點餐 (統一開彈窗)
 function handleAddToOrder(product) {
     openOptionsModal(product);
 }
@@ -516,15 +270,12 @@ function openOptionsModal(product) {
     state.currentItemWithOptions = product;
     document.getElementById('modal-item-name').textContent = product.item;
 
-    // 初始化數量
     document.getElementById('modal-qty-input').value = 1;
     document.querySelectorAll('.chip-qty').forEach(c => c.classList.remove('active'));
 
-    // 重設選項顯示
     document.getElementById('temp-options-group').style.display = product.hasTemp ? 'block' : 'none';
     document.getElementById('sugar-options-group').style.display = product.hasSugar ? 'block' : 'none';
 
-    // 重設選中狀態
     document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
     document.getElementById('options-modal').classList.remove('hidden');
 }
@@ -557,12 +308,16 @@ function confirmOptions() {
 
 function confirmAddToOrder(product, options) {
     const qty = options.qty || 1;
-    // 檢查是否已有相同品項且相同選項
+    const pickupDate = document.getElementById('pickup-date').value;
+    const pickupTime = document.getElementById('pickup-time').value;
+
     const existing = state.order.find(o =>
         o.shop === product.shop &&
         o.item === product.item &&
         o.temp === (options.temp || '') &&
-        o.sugar === (options.sugar || '')
+        o.sugar === (options.sugar || '') &&
+        o.pickupDate === pickupDate &&
+        o.pickupTime === pickupTime
     );
 
     if (existing) {
@@ -572,7 +327,9 @@ function confirmAddToOrder(product, options) {
             ...product,
             qty: qty,
             temp: options.temp || '',
-            sugar: options.sugar || ''
+            sugar: options.sugar || '',
+            pickupDate: pickupDate,
+            pickupTime: pickupTime
         });
     }
     showToast(`已加入：${product.item} x${qty}`);
@@ -582,11 +339,6 @@ function confirmAddToOrder(product, options) {
 function updateQty(index, delta) {
     state.order[index].qty += delta;
     if (state.order[index].qty <= 0) state.order.splice(index, 1);
-    renderOrder();
-}
-
-function setQty(index, value) {
-    state.order[index].qty = value;
     renderOrder();
 }
 
@@ -621,24 +373,35 @@ function renderOrder() {
     Object.keys(groups).forEach(shopName => {
         const groupDiv = document.createElement('div');
         groupDiv.className = 'shop-order-group';
-        let itemsHtml = groups[shopName].map(o => {
-            totalOverall += o.price * o.qty;
-            const optionsLabel = (o.temp || o.sugar) ? `<div class="item-options-label">${[o.temp, o.sugar].filter(v => v).join(', ')}</div>` : '';
-            return `
-                <div class="order-row">
-                    <div class="order-item-detail">
-                        <div class="item-name">${o.item}</div>
-                        ${optionsLabel}
-                        <div class="item-price">$${o.price}</div>
+        
+        const timeGroups = {};
+        groups[shopName].forEach(o => {
+            if (!timeGroups[o.pickupTime]) timeGroups[o.pickupTime] = [];
+            timeGroups[o.pickupTime].push(o);
+        });
+
+        let itemsHtml = '';
+        Object.keys(timeGroups).sort().forEach(time => {
+            itemsHtml += `<div class="time-group-header">⏰ ${time}</div>`;
+            itemsHtml += timeGroups[time].map(o => {
+                totalOverall += o.price * o.qty;
+                const optionsLabel = (o.temp || o.sugar) ? `<div class="item-options-label">${[o.temp, o.sugar].filter(v => v).join(', ')}</div>` : '';
+                return `
+                    <div class="order-row">
+                        <div class="order-item-detail">
+                            <div class="item-name">${o.item}</div>
+                            ${optionsLabel}
+                            <div class="item-price">$${o.price}</div>
+                        </div>
+                        <div class="controls">
+                            <button class="qty-btn minus" onclick="updateQty(${o.originalIndex}, -1)">-</button>
+                            <span class="qty-val">${o.qty}</span>
+                            <button class="qty-btn" onclick="updateQty(${o.originalIndex}, 1)">+</button>
+                        </div>
                     </div>
-                    <div class="controls">
-                        <button class="qty-btn minus" onclick="updateQty(${o.originalIndex}, -1)">-</button>
-                        <span class="qty-val">${o.qty}</span>
-                        <button class="qty-btn" onclick="updateQty(${o.originalIndex}, 1)">+</button>
-                    </div>
-                </div>
-            `;
-        }).join('');
+                `;
+            }).join('');
+        });
 
         groupDiv.innerHTML = `
             <div class="shop-group-header">
@@ -658,15 +421,28 @@ function renderOrder() {
 
 function copyOrderText(shopName) {
     const shopItems = state.order.filter(o => o.shop === shopName);
-    const date = document.getElementById('pickup-date').value;
-    const time = document.getElementById('pickup-time').value;
-    const itemsText = shopItems.map((o, index) => {
-        const opts = [o.temp, o.sugar].filter(v => v).join(', ');
-        const itemLine = `${o.item}${opts ? '(' + opts + ')' : ''} x${o.qty}`;
-        return index === 0 ? itemLine : `          ${itemLine}`;
-    }).join('\n');
+    if (shopItems.length === 0) return;
+    
+    const date = shopItems[0].pickupDate || document.getElementById('pickup-date').value;
+    
+    const timeGroups = {};
+    shopItems.forEach(o => {
+        const t = o.pickupTime || document.getElementById('pickup-time').value;
+        if (!timeGroups[t]) timeGroups[t] = [];
+        timeGroups[t].push(o);
+    });
+
+    let itemsText = '';
+    Object.keys(timeGroups).sort().forEach(time => {
+        itemsText += `⏰ 取餐時間：${time}\n`;
+        itemsText += timeGroups[time].map(o => {
+            const opts = [o.temp, o.sugar].filter(v => v).join(', ');
+            return `內容：${o.item}${opts ? '(' + opts + ')' : ''} x${o.qty}`;
+        }).join('\n') + '\n\n';
+    });
+
     const shopTotal = shopItems.reduce((acc, o) => acc + (o.price * o.qty), 0);
-    const text = `【訂餐資訊】毓琇\n日期：${date}\n時間：${time}\n內容：${itemsText}\n總額：$${shopTotal}\n\n再麻煩您了，謝謝`;
+    const text = `【訂餐資訊】毓琇\n\n日期：${date}\n\n${itemsText.trim()}\n\n總額：$${shopTotal}\n\n再麻煩您了，謝謝`;
     navigator.clipboard.writeText(text).then(() => showToast(`✅ 已複製 ${shopName} 的內容`));
 }
 
@@ -692,41 +468,45 @@ function renderRecords() {
 }
 
 async function submitOrder() {
-    const token = gapi.client.getToken();
-    if (token === null || Date.now() > localStorage.getItem('google_token_expiry')) {
-        showToast('🔑 授權已過期，請重新登入 Google');
-        getToken(submitOrder);
-        return;
-    }
     const submitBtn = document.getElementById('submit-order');
     submitBtn.disabled = true;
     submitBtn.textContent = '送出中...';
-    const pickupDate = document.getElementById('pickup-date').value;
-    const pickupTime = document.getElementById('pickup-time').value;
+    
+    const dates = [...new Set(state.order.map(o => o.pickupDate))].join(', ') || document.getElementById('pickup-date').value;
+    const times = [...new Set(state.order.map(o => o.pickupTime))].sort().join(', ') || document.getElementById('pickup-time').value;
+    
     const items = state.order.map(o => {
         const opts = [o.temp, o.sugar].filter(v => v).join(', ');
-        return `${o.shop}-${o.item}${opts ? '(' + opts + ')' : ''} x${o.qty}`;
+        return `[${o.pickupTime}] ${o.shop}-${o.item}${opts ? '(' + opts + ')' : ''} x${o.qty}`;
     }).join(', ');
+    
     const total = state.order.reduce((acc, o) => acc + (o.price * o.qty), 0);
+    
     try {
-        await gapi.client.sheets.spreadsheets.values.append({
-            spreadsheetId: SPREADSHEET_ID,
-            range: '紀錄!A:D',
-            valueInputOption: 'USER_ENTERED',
-            resource: { values: [[pickupDate, pickupTime, items, total]] },
+        const res = await sendPostRequest({
+            action: 'submitOrder',
+            pickupDate: dates,
+            pickupTime: times,
+            items: items,
+            total: total
         });
-        showToast('✅ 點餐成功！');
-        state.order = []; renderOrder(); fetchData();
+        
+        if (res.status === 'success') {
+            showToast('✅ 點餐成功！');
+            state.order = []; 
+            renderOrder(); 
+            fetchData();
+        } else {
+            showToast(`❌ 送出失敗：${res.message}`);
+        }
     } catch (err) {
         console.error('Submit error:', err);
-        showToast('❌ 送出失敗，請確認網路或授權');
+        showToast('❌ 送出失敗，請確認網路');
     } finally {
         submitBtn.disabled = false;
         submitBtn.textContent = '確認送出';
     }
 }
-
-// --- 管理員功能實作 ---
 
 function openAddShopModal() {
     document.getElementById('new-shop-name').value = '';
@@ -738,17 +518,21 @@ async function confirmAddShop() {
     if (!shopName) return showToast('⚠️ 請輸入店名');
 
     try {
-        await gapi.client.sheets.spreadsheets.values.append({
-            spreadsheetId: SPREADSHEET_ID,
-            range: '早餐店!A:A',
-            valueInputOption: 'USER_ENTERED',
-            resource: { values: [[shopName]] },
+        const res = await sendPostRequest({
+            action: 'addShop',
+            password: state.adminPassword,
+            shopName: shopName
         });
-        showToast(`✅ 已新增：${shopName}`);
-        document.getElementById('add-shop-modal').classList.add('hidden');
-        fetchData();
+        
+        if (res.status === 'success') {
+            showToast(`✅ 已新增：${shopName}`);
+            document.getElementById('add-shop-modal').classList.add('hidden');
+            fetchData();
+        } else {
+            showToast(`❌ 新增失敗：${res.message}`);
+        }
     } catch (err) {
-        showToast('❌ 新增失敗，請確認權限');
+        showToast('❌ 新增失敗，請確認網路');
     }
 }
 
@@ -765,23 +549,30 @@ async function confirmAddMeal() {
     const price = document.getElementById('new-meal-price').value.trim();
     if (!name || !price) return showToast('⚠️ 請填寫名稱與價格');
 
-    // 自動判斷是否給予溫度/甜度選項
     const isDrink = ["紅茶", "豆漿", "奶茶", "咖啡", "拿鐵"].some(key => name.includes(key));
     const hasTemp = isDrink ? "v" : "";
     const hasSugar = isDrink ? "v" : "";
 
     try {
-        await gapi.client.sheets.spreadsheets.values.append({
-            spreadsheetId: SPREADSHEET_ID,
-            range: '價格!A:E',
-            valueInputOption: 'USER_ENTERED',
-            resource: { values: [[state.currentShop, name, price, hasTemp, hasSugar]] },
+        const res = await sendPostRequest({
+            action: 'addMeal',
+            password: state.adminPassword,
+            shop: state.currentShop,
+            item: name,
+            price: price,
+            hasTemp: hasTemp,
+            hasSugar: hasSugar
         });
-        showToast(`✅ 已新增：${name}`);
-        document.getElementById('add-meal-modal').classList.add('hidden');
-        fetchData();
+        
+        if (res.status === 'success') {
+            showToast(`✅ 已新增：${name}`);
+            document.getElementById('add-meal-modal').classList.add('hidden');
+            fetchData();
+        } else {
+            showToast(`❌ 新增失敗：${res.message}`);
+        }
     } catch (err) {
-        showToast('❌ 新增失敗，請確認權限');
+        showToast('❌ 新增失敗，請確認網路');
     }
 }
 

@@ -346,6 +346,14 @@ header h1 {
     color: var(--primary-dark);
 }
 
+.time-group-header {
+    font-size: 0.9rem;
+    font-weight: bold;
+    color: var(--text-light);
+    margin: 10px 0 5px;
+    padding-left: 5px;
+}
+
 .btn-copy-shop {
     background: var(--primary-color);
     color: white;

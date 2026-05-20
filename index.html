@@ -17,24 +17,15 @@
 </head>
 
 <body>
-    <!-- 全螢幕登入遮罩 -->
-    <div id="login-overlay" class="login-overlay">
-        <div class="login-card card">
-            <h1>🍳 早安！點餐囉</h1>
-            <p class="login-subtitle">請登入您的 Google 帳號以開始</p>
-            <button id="login-btn-lg" class="btn-primary btn-lg" disabled>⌛ 正在初始化系統...</button>
-            <p id="auth-error-msg" class="error-msg hidden">⚠️ 您不在授權名單中，請聯繫管理員。</p>
-        </div>
-    </div>
+
 
     <div class="app-container">
         <header>
             <div class="top-checkout">
                 <!-- 新增：登入狀態 -->
                 <div id="auth-status" class="auth-status">
-                    <span id="user-role" class="badge"></span>
-                    <span id="user-name"></span>
-                    <button id="auth-btn" class="btn-secondary">🔓 登出</button>
+                    <span id="user-role" class="badge">👤 一般人員</span>
+                    <button id="auth-btn" class="btn-secondary">👑 管理員登入</button>
                 </div>
                 <div class="checkout-main">
                     <div class="total-info">
@@ -194,12 +185,25 @@
         </div>
     </div>
 
+    <!-- 管理員登入彈窗 -->
+    <div id="admin-login-modal" class="modal hidden">
+        <div class="modal-content card">
+            <h3>👑 管理員登入</h3>
+            <p class="subtitle">請輸入管理員密碼以解鎖新增與刪除功能</p>
+            <div class="input-group" style="margin-top: 15px;">
+                <input type="password" id="admin-password-input" placeholder="請輸入密碼...">
+            </div>
+            <div class="modal-actions">
+                <button id="cancel-admin-login" class="btn-secondary">取消</button>
+                <button id="confirm-admin-login" class="btn-primary">確認登入</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 設定檔 -->
     <script src="config.js"></script>
     <!-- 主程式 -->
     <script src="script.js"></script>
-    <script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
-    <script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
 </body>
 
 </html>

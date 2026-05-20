@@ -1,8 +1,7 @@
 /**
- * Google API 專案設定檔 (本地端)
- * 注意：此檔案包含敏感金鑰，請勿上傳至 GitHub。
+ * 早餐點餐工具 - 設定檔
  */
 const CONFIG = {
-    CLIENT_ID: '1060578452489-hhjqilk0dn4tj963n1agit4l1v8fmvgg.apps.googleusercontent.com',
-    SPREADSHEET_ID: '1JsaakK6zSYW_rSpSCU0_SxUA6kMbCptllX2XQlrTtZw'
+    // 您的 Google Apps Script 網頁應用程式網址
+    GAS_URL: 'https://script.google.com/macros/s/AKfycbw7pp1C-JICmYQyV-vBywsu8zfOXIqBvUdThwc58_5VVO77MhgE75IpsUOcm1DZ2w6vmQ/exec', // ← 請在此處填入發布後的 Apps Script 網址
 };
