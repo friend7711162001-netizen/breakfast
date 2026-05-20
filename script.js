@@ -457,7 +457,7 @@ function renderRecords() {
         recordList.innerHTML = '<p class="empty-msg">尚無紀錄</p>';
         return;
     }
-    state.records.forEach(r => {
+    state.records.slice(0, 5).forEach(r => {
         const div = document.createElement('div');
         div.className = 'record-item';
         div.innerHTML = `
