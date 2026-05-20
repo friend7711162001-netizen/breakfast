@@ -36,7 +36,11 @@ function initApp() {
 }
 
 // 啟動應用程式
-document.addEventListener('DOMContentLoaded', initApp);
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initApp);
+} else {
+    initApp();
+}
 
 function updateRoleUI() {
     const roleBadge = document.getElementById('user-role');
